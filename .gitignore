@@ -26,3 +26,6 @@ venv/
 
 # Cache
 .cache/
+
+# Skills directory
+skills/
