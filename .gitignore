@@ -17,15 +17,37 @@ __pycache__/
 # IDE
 .vscode/
 .idea/
+.trae/
+.sisyphus/
 
 # Environment
 .env
 .venv
 env/
 venv/
+anaconda_projects/
 
 # Cache
 .cache/
 
 # Skills directory
 skills/
+
+# Local PhD application prep
+phd-application-plan/
+
+# Runtime / local logs
+logs/runtime_archive/
+*.pid
+*.log
+
+# Legacy notebooks and local notebook state
+notebooks/legacy_root/
+
+# Model assets and bulky artifacts
+archive/model_assets/
+
+# Optional: keep canonical artifacts tracked only when intentional
+# Remove these ignores if you want Git to track generated experiment outputs.
+# artifacts/results/
+# artifacts/checkpoints/
