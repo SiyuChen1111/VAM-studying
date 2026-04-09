@@ -1,4 +1,4 @@
-# VAM-studying
+# Flaner-rt-distribution-modeling
 
 This repository studies **human reaction-time (RT) behavior** in the LIM / Flanker task using a **VGG-based visual front-end** and **decision-dynamics models**.
 
