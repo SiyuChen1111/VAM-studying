@@ -31,6 +31,102 @@ def apply_stage2_input_transform(logits: torch.Tensor, scale: torch.Tensor) -> t
     return F.relu(logits * scale)
 
 
+def _build_alpha_pulse(time_axis: torch.Tensor, peak_s: float) -> torch.Tensor:
+    peak = max(float(peak_s), 1e-6)
+    scaled_time = time_axis / peak
+    return scaled_time * torch.exp(1.0 - scaled_time)
+
+
+def build_dynamic_stage2_input(
+    logits: torch.Tensor,
+    scale: torch.Tensor,
+    time_steps: int,
+    config: Optional[Dict[str, Any]] = None,
+    target_labels: Optional[torch.Tensor] = None,
+    flanker_labels: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    transformed = apply_stage2_input_transform(logits, scale)
+    config = config or {}
+    selection_mode = str(config.get('selection_mode', 'baseline'))
+    if selection_mode == 'baseline':
+        return transformed, {}
+    if selection_mode not in {'dynamic_flanker_suppression', 'dynamic_flanker_dmc_like'}:
+        raise ValueError(f"Unknown selection_mode: {selection_mode}")
+    if target_labels is None or flanker_labels is None:
+        raise ValueError(f'{selection_mode} requires target_labels and flanker_labels')
+
+    dt_ms = float(config.get('dt_ms', 10.0))
+    selection_strength = float(config.get('selection_strength', 0.35))
+    selection_midpoint_s = float(config.get('selection_midpoint_s', 0.18))
+    selection_tau_s = max(float(config.get('selection_tau_s', 0.06)), 1e-6)
+    target_boost = float(config.get('target_boost', 0.0))
+    selection_apply_to = str(config.get('selection_apply_to', 'incongruent_only'))
+    auto_strength = float(config.get('auto_strength', 0.0))
+    auto_peak_s = float(config.get('auto_peak_s', 0.06))
+    # Optional minimal mechanism: time-localized conflict capture.
+    # Default disabled (capture_strength=0.0) to preserve baseline behavior.
+    capture_strength = float(config.get('capture_strength', 0.0))
+    capture_midpoint_s = float(config.get('capture_midpoint_s', 0.05))
+    capture_tau_s = max(float(config.get('capture_tau_s', 0.03)), 1e-6)
+
+    batch_size, n_classes = transformed.shape
+    if target_labels.shape[0] != batch_size or flanker_labels.shape[0] != batch_size:
+        raise ValueError('target_labels/flanker_labels must align with logits batch size')
+
+    time_axis = torch.arange(time_steps, device=transformed.device, dtype=transformed.dtype) * (dt_ms / 1000.0)
+    selection_gate = torch.sigmoid((time_axis - selection_midpoint_s) / selection_tau_s)
+    auto_pulse_t = torch.zeros_like(selection_gate)
+    capture_pulse_t = torch.zeros_like(selection_gate)
+    selection_mode_id = 1
+    if selection_mode == 'dynamic_flanker_dmc_like':
+        auto_pulse_t = _build_alpha_pulse(time_axis, peak_s=auto_peak_s)
+        selection_mode_id = 2
+    if selection_mode == 'dynamic_flanker_suppression' and abs(capture_strength) > 0.0:
+        # Symmetric, bounded pulse peaking near capture_midpoint_s.
+        capture_pulse_t = torch.exp(-torch.abs(time_axis - capture_midpoint_s) / capture_tau_s)
+    flanker_multiplier_t = (
+        1.0
+        + capture_strength * capture_pulse_t
+        + auto_strength * auto_pulse_t
+        - selection_strength * selection_gate
+    ).clamp_min(0.0)
+    target_multiplier_t = (1.0 - auto_strength * auto_pulse_t + target_boost * selection_gate).clamp_min(0.0)
+
+    dynamic_input = transformed.unsqueeze(1).repeat(1, time_steps, 1)
+    if selection_apply_to == 'incongruent_only':
+        selection_trial_mask = target_labels != flanker_labels
+    elif selection_apply_to == 'all_trials':
+        selection_trial_mask = torch.ones(batch_size, device=transformed.device, dtype=torch.bool)
+    else:
+        raise ValueError(f"Unknown selection_apply_to: {selection_apply_to}")
+
+    selected_idx = torch.nonzero(selection_trial_mask, as_tuple=False).squeeze(1)
+    if selected_idx.numel() > 0:
+        time_idx = torch.arange(time_steps, device=transformed.device).unsqueeze(0)
+        flanker_idx = flanker_labels[selected_idx].unsqueeze(1)
+        dynamic_input[selected_idx.unsqueeze(1), time_idx, flanker_idx] = (
+            dynamic_input[selected_idx.unsqueeze(1), time_idx, flanker_idx]
+            * flanker_multiplier_t.unsqueeze(0)
+        )
+        if abs(target_boost) > 0.0:
+            target_idx = target_labels[selected_idx].unsqueeze(1)
+            dynamic_input[selected_idx.unsqueeze(1), time_idx, target_idx] = (
+                dynamic_input[selected_idx.unsqueeze(1), time_idx, target_idx]
+                * target_multiplier_t.unsqueeze(0)
+            )
+
+    traces = {
+        'selection_mode': torch.tensor(selection_mode_id, device=transformed.device, dtype=torch.int32),
+        'selection_gate': selection_gate,
+        'auto_pulse_t': auto_pulse_t,
+        'capture_pulse_t': capture_pulse_t,
+        'flanker_multiplier_t': flanker_multiplier_t,
+        'target_multiplier_t': target_multiplier_t,
+        'selection_trial_mask': selection_trial_mask.to(torch.int32),
+    }
+    return dynamic_input, traces
+
+
 def _first_crossing_times(evidence_traj: torch.Tensor, dt_ms: float) -> Tuple[torch.Tensor, torch.Tensor]:
     max_time = evidence_traj.shape[1]
     crossing_mask = evidence_traj > 0
@@ -50,9 +146,7 @@ def compute_legacy_choice_logits(evidence_traj: torch.Tensor, choice_temperature
 def compute_baseline_readout(
     evidence_traj: torch.Tensor,
     readout_config: Optional[Dict[str, Any]] = None,
-    rng: Optional[torch.Generator] = None,
 ) -> Dict[str, torch.Tensor]:
-    del rng
     config = readout_config or {}
     dt_ms = float(config.get('dt_ms', 10.0))
     decision_indices, decision_times = _first_crossing_times(evidence_traj, dt_ms=dt_ms)
@@ -76,9 +170,7 @@ def extract_decision_variable(evidence_traj: torch.Tensor, config: Optional[Dict
 def compute_soft_hazard_readout(
     evidence_traj: torch.Tensor,
     config: Optional[Dict[str, Any]] = None,
-    rng: Optional[torch.Generator] = None,
 ) -> Dict[str, torch.Tensor]:
-    del rng
     config = config or {}
     dt_ms = float(config.get('dt_ms', 10.0))
     alpha = float(config.get('alpha', 12.0))
@@ -125,9 +217,7 @@ def compute_soft_hazard_readout(
 def compute_urgency_readout(
     evidence_traj: torch.Tensor,
     config: Optional[Dict[str, Any]] = None,
-    rng: Optional[torch.Generator] = None,
 ) -> Dict[str, torch.Tensor]:
-    del rng
     config = config or {}
     dt_ms = float(config.get('dt_ms', 10.0))
     urgency_type = str(config.get('urgency_type', 'additive_urgency'))
@@ -192,14 +282,13 @@ def compute_rt_readout(
     mode: str,
     evidence_traj: torch.Tensor,
     readout_config: Optional[Dict[str, Any]] = None,
-    rng: Optional[torch.Generator] = None,
 ) -> Dict[str, torch.Tensor]:
     if mode == 'baseline':
-        return compute_baseline_readout(evidence_traj, readout_config=readout_config, rng=rng)
+        return compute_baseline_readout(evidence_traj, readout_config=readout_config)
     if mode == 'soft_hazard':
-        return compute_soft_hazard_readout(evidence_traj, config=readout_config, rng=rng)
+        return compute_soft_hazard_readout(evidence_traj, config=readout_config)
     if mode == 'urgency':
-        return compute_urgency_readout(evidence_traj, config=readout_config, rng=rng)
+        return compute_urgency_readout(evidence_traj, config=readout_config)
     if mode == 'noisy_readout':
         raise NotImplementedError(f"RT readout mode '{mode}' is reserved for later experiments.")
     raise ValueError(f"Unknown RT readout mode: {mode}")
@@ -273,7 +362,20 @@ class WongWangMultiClassDecision(nn.Module):
         self.time_steps = time_steps
         self.t_stimulus = t_stimulus
     
-    def forward(self, input_signal: torch.Tensor) -> torch.Tensor:
+    def _sample_noise(
+        self,
+        batch_size: int,
+        device: torch.device,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        return torch.randn(
+            batch_size,
+            self.n_classes,
+            device=device,
+            generator=generator,
+        )
+
+    def forward(self, input_signal: torch.Tensor, generator: Optional[torch.Generator] = None) -> torch.Tensor:
         """
         Forward pass through Wong-Wang dynamics.
         
@@ -287,7 +389,7 @@ class WongWangMultiClassDecision(nn.Module):
         device = input_signal.device
         
         s = torch.ones(batch_size, self.n_classes, requires_grad=False, device=device) / 10.0
-        I_noise = torch.randn(batch_size, self.n_classes, requires_grad=False, device=device) * self.noise_ampa
+        I_noise = self._sample_noise(batch_size, device, generator=generator) * self.noise_ampa
         
         trajectory = torch.zeros((batch_size, self.time_steps, self.n_classes), device=device)
         dsdt_trajectory = torch.zeros((batch_size, self.time_steps, self.n_classes), device=device)
@@ -309,7 +411,7 @@ class WongWangMultiClassDecision(nn.Module):
             
             I_noise = I_noise.clone() * torch.exp(-self.dt / self.tau_ampa) + \
                 self.noise_ampa * torch.sqrt((1 - torch.exp(-2 * self.dt / self.tau_ampa)) / 2.0) * \
-                torch.randn(batch_size, self.n_classes, requires_grad=False, device=device)
+                self._sample_noise(batch_size, device, generator=generator)
             
             s = s.clone() + dsdt * self.dt
             
@@ -322,7 +424,11 @@ class WongWangMultiClassDecision(nn.Module):
         
         return decision_times_class / 1000.0
     
-    def inference(self, input_signal: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def inference(
+        self,
+        input_signal: torch.Tensor,
+        generator: Optional[torch.Generator] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Inference mode returning trajectory for visualization.
         
@@ -335,7 +441,7 @@ class WongWangMultiClassDecision(nn.Module):
         device = input_signal.device
         
         s = torch.ones(batch_size, self.n_classes, requires_grad=False, device=device) / 10.0
-        I_noise = torch.randn(batch_size, self.n_classes, requires_grad=False, device=device) * self.noise_ampa
+        I_noise = self._sample_noise(batch_size, device, generator=generator) * self.noise_ampa
         
         trajectory = torch.zeros((batch_size, self.time_steps, self.n_classes), device=device)
         dsdt_trajectory = torch.zeros((batch_size, self.time_steps, self.n_classes), device=device)
@@ -355,7 +461,7 @@ class WongWangMultiClassDecision(nn.Module):
             
             I_noise = I_noise.clone() * torch.exp(-self.dt / self.tau_ampa) + \
                 self.noise_ampa * torch.sqrt((1 - torch.exp(-2 * self.dt / self.tau_ampa)) / 2.0) * \
-                torch.randn(batch_size, self.n_classes, requires_grad=False, device=device)
+                self._sample_noise(batch_size, device, generator=generator)
             
             s = s.clone() + dsdt * self.dt
             

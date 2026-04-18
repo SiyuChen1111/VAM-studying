@@ -10,6 +10,7 @@ This script:
 import os
 import json
 import argparse
+import random
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -37,6 +38,7 @@ from vgg_wongwang_lim import (
     VGGFeatureExtractor,
     WWWrapper,
     apply_stage2_input_transform,
+    build_dynamic_stage2_input,
     compute_legacy_choice_logits,
     compute_rt_readout,
 )
@@ -74,10 +76,29 @@ def compute_human_stats_from_rts(rts: np.ndarray) -> Dict[str, float]:
 
 
 def set_random_seed(seed: int):
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, 'use_deterministic_algorithms'):
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    if hasattr(torch.backends, 'cudnn'):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def build_torch_generator(seed: int, device: torch.device) -> Optional[torch.Generator]:
+    generator_device = 'cuda' if device.type == 'cuda' else 'cpu'
+    try:
+        generator = torch.Generator(device=generator_device)
+    except (RuntimeError, TypeError):
+        if generator_device != 'cpu':
+            generator = torch.Generator()
+        else:
+            return None
+    generator.manual_seed(int(seed))
+    return generator
 
 
 def subset_cached_stage2_inputs(cached: Dict[str, np.ndarray], fraction: float, seed: int) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
@@ -87,6 +108,18 @@ def subset_cached_stage2_inputs(cached: Dict[str, np.ndarray], fraction: float, 
     indices = np.sort(rng.choice(total_rows, size=subset_rows, replace=False))
     subset = {key: value[indices] for key, value in cached.items()}
     return subset, indices
+
+
+def attach_flanker_labels_from_csv(cached: Dict[str, np.ndarray], csv_path: str) -> Dict[str, np.ndarray]:
+    if 'flanker_labels' in cached:
+        return cached
+    df = pd.read_csv(csv_path)
+    if len(df) != len(cached['logits']):
+        raise ValueError(f"Length mismatch while attaching flanker_labels: csv={len(df)} logits={len(cached['logits'])}")
+    flanker_labels = df['flanker_direction'].map(lambda x: DIRECTION_MAP[x]).to_numpy(dtype=np.int64)
+    enriched = dict(cached)
+    enriched['flanker_labels'] = flanker_labels
+    return enriched
 
 
 def subset_smoke_eval_inputs(
@@ -395,11 +428,24 @@ def compute_stage2_outputs(
     choice_temperature: float,
     rt_readout_mode: str = 'baseline',
     readout_config: Optional[Dict[str, Any]] = None,
+    selection_config: Optional[Dict[str, Any]] = None,
+    target_labels: Optional[torch.Tensor] = None,
+    flanker_labels: Optional[torch.Tensor] = None,
+    random_seed: Optional[int] = None,
 ):
+    eval_generator = None
+    if random_seed is not None:
+        eval_generator = build_torch_generator(int(random_seed), logits_batch.device)
     scale_tensor = model.state_dict()['scale']
-    scaled_logits = apply_stage2_input_transform(logits_batch, scale_tensor)
-    decision_times = model.ww(scaled_logits)
-    _, trajectory, threshold = model.ww.inference(scaled_logits)
+    ww_input, selection_traces = build_dynamic_stage2_input(
+        logits_batch,
+        scale_tensor,
+        time_steps=model.ww.time_steps,
+        config=selection_config,
+        target_labels=target_labels,
+        flanker_labels=flanker_labels,
+    )
+    decision_times, trajectory, threshold = model.ww.inference(ww_input, generator=eval_generator)
     evidence_traj = trajectory - threshold
     choice_logits = compute_legacy_choice_logits(evidence_traj, choice_temperature)
 
@@ -413,6 +459,8 @@ def compute_stage2_outputs(
     readout = dict(readout)
     readout['traj'] = trajectory
     readout['threshold'] = threshold
+    for key, value in selection_traces.items():
+        readout[key] = value
 
     return final_dt, choice_logits, decision_times, readout
 
@@ -641,6 +689,7 @@ def train_stage2_with_scale(
     target_labels: np.ndarray,
     response_labels: np.ndarray,
     congruency: np.ndarray,
+    flanker_labels: Optional[np.ndarray],
     human_stats: Dict,
     epochs: int = 20,
     lr: float = 1e-4,
@@ -661,6 +710,7 @@ def train_stage2_with_scale(
     tail_quantiles: Optional[np.ndarray] = None,
     rt_readout_mode: str = 'baseline',
     readout_config: Optional[Dict[str, Any]] = None,
+    selection_config: Optional[Dict[str, Any]] = None,
     behavior_smoke_mode: str = 'baseline',
     behavior_loss_mode: str = 'baseline',
     behavior_loss_weight: float = 0.0,
@@ -676,8 +726,13 @@ def train_stage2_with_scale(
     tail_spread_weight: float = 0.18,
     error_slower_weight: float = 0.0,
     congruency_rt_weight: float = 0.18,
+    random_seed: Optional[int] = None,
+    eval_random_seed: Optional[int] = None,
 ) -> Tuple[Dict, float, Dict, Dict[str, Any]]:
     """Train Stage 2 model with a specific scale value."""
+    if random_seed is not None:
+        set_random_seed(int(random_seed))
+
     
     # Create model
     model = WWWrapper(n_classes=4, dt=dt, time_steps=time_steps)
@@ -705,9 +760,16 @@ def train_stage2_with_scale(
     target_tensor = torch.tensor(target_labels, dtype=torch.long)
     response_tensor = torch.tensor(response_labels, dtype=torch.long)
     congruency_tensor = torch.tensor(congruency, dtype=torch.long)
+    flanker_tensor = None if flanker_labels is None else torch.tensor(flanker_labels, dtype=torch.long)
 
-    dataset = TensorDataset(logits_tensor, rts_tensor, target_tensor, response_tensor, congruency_tensor)
-    dataloader = DataLoader(dataset, batch_size=256, shuffle=True)
+    if flanker_tensor is None:
+        dataset = TensorDataset(logits_tensor, rts_tensor, target_tensor, response_tensor, congruency_tensor)
+    else:
+        dataset = TensorDataset(logits_tensor, rts_tensor, target_tensor, response_tensor, congruency_tensor, flanker_tensor)
+    dataloader_generator = torch.Generator()
+    if random_seed is not None:
+        dataloader_generator.manual_seed(int(random_seed))
+    dataloader = DataLoader(dataset, batch_size=256, shuffle=True, generator=dataloader_generator)
     
     # Optimizer
     optimizer = Adam(model.parameters(), lr=lr)
@@ -730,12 +792,19 @@ def train_stage2_with_scale(
         total_loss = 0.0
         epoch_start = perf_counter()
         
-        for batch_logits, batch_rt, batch_target, batch_response, batch_congruency in dataloader:
+        for batch in dataloader:
+            if flanker_tensor is None:
+                batch_logits, batch_rt, batch_target, batch_response, batch_congruency = batch
+                batch_flanker = None
+            else:
+                batch_logits, batch_rt, batch_target, batch_response, batch_congruency, batch_flanker = batch
             batch_logits = batch_logits.to(device)
             batch_rt = batch_rt.to(device)
             batch_target = batch_target.to(device)
             batch_response = batch_response.to(device)
             batch_congruency = batch_congruency.to(device)
+            if batch_flanker is not None:
+                batch_flanker = batch_flanker.to(device)
             
             optimizer.zero_grad()
             final_dt, choice_logits, _, _ = compute_stage2_outputs(
@@ -744,6 +813,9 @@ def train_stage2_with_scale(
                 choice_temperature,
                 rt_readout_mode=rt_readout_mode,
                 readout_config=readout_config,
+                selection_config=selection_config,
+                target_labels=batch_target,
+                flanker_labels=batch_flanker,
             )
             rt_loss = criterion(final_dt, batch_rt)
             choice_loss = F.cross_entropy(choice_logits, batch_response)
@@ -842,6 +914,10 @@ def train_stage2_with_scale(
                     choice_temperature,
                     rt_readout_mode=rt_readout_mode,
                     readout_config=readout_config,
+                    selection_config=selection_config,
+                    target_labels=target_tensor.to(device),
+                    flanker_labels=None if flanker_tensor is None else flanker_tensor.to(device),
+                    random_seed=None if eval_random_seed is None else int(eval_random_seed + epoch + 1),
                 )
                 pred_rt = pred_rt_t.cpu().numpy()
                 pred_choice = choice_logits_t.argmax(dim=1).cpu().numpy()
@@ -913,7 +989,12 @@ def load_cached_logits_npz(npz_path: str) -> Dict[str, np.ndarray]:
     if missing:
         raise KeyError(f"Cached logits file missing required keys {missing}: {npz_path}")
 
-    return {key: cached[key] for key in required_keys}
+    optional_keys = ['flanker_labels']
+    output = {key: cached[key] for key in required_keys}
+    for key in optional_keys:
+        if key in cached.files:
+            output[key] = cached[key]
+    return output
 
 
 def validate_cached_stage2_inputs(age_group: str, data_dir: str, train_logits_path: str, test_logits_path: str):
@@ -1048,7 +1129,13 @@ def infer_predictions_from_params(
     choice_temperature: float = 0.05,
     rt_readout_mode: str = 'baseline',
     readout_config: Optional[Dict[str, Any]] = None,
+    selection_config: Optional[Dict[str, Any]] = None,
+    target_labels: Optional[np.ndarray] = None,
+    flanker_labels: Optional[np.ndarray] = None,
+    random_seed: Optional[int] = None,
 ):
+    if random_seed is not None:
+        set_random_seed(int(random_seed))
     model = WWWrapper(n_classes=4, dt=10, time_steps=time_steps)
     state_dict = model.state_dict()
     for key in state_dict:
@@ -1065,6 +1152,10 @@ def infer_predictions_from_params(
             choice_temperature,
             rt_readout_mode=rt_readout_mode,
             readout_config=readout_config,
+            selection_config=selection_config,
+            target_labels=None if target_labels is None else torch.tensor(target_labels, dtype=torch.long).to(device),
+            flanker_labels=None if flanker_labels is None else torch.tensor(flanker_labels, dtype=torch.long).to(device),
+            random_seed=random_seed,
         )
     output = {
         'pred_rt': pred_rt_t.cpu().numpy(),
@@ -1078,6 +1169,47 @@ def infer_predictions_from_params(
     return output
 
 
+def evaluate_cached_stage2_params(
+    *,
+    params: Dict,
+    scale: float,
+    time_steps: int,
+    cached: Dict[str, np.ndarray],
+    device: str,
+    choice_temperature: float = 0.05,
+    rt_readout_mode: str = 'baseline',
+    readout_config: Optional[Dict[str, Any]] = None,
+    selection_config: Optional[Dict[str, Any]] = None,
+    random_seed: Optional[int] = None,
+    rt_shape_focus: bool = False,
+) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
+    predictions = infer_predictions_from_params(
+        params=params,
+        scale=scale,
+        time_steps=time_steps,
+        logits=cached['logits'],
+        device=device,
+        choice_temperature=choice_temperature,
+        rt_readout_mode=rt_readout_mode,
+        readout_config=readout_config,
+        selection_config=selection_config,
+        target_labels=cached.get('target_labels'),
+        flanker_labels=cached.get('flanker_labels'),
+        random_seed=random_seed,
+    )
+    canonical_results = evaluate_joint_behavior(
+        pred_rt=predictions['pred_rt'],
+        pred_choice=predictions['pred_choice'],
+        true_rt=cached['rts'],
+        target_labels=cached['target_labels'],
+        response_labels=cached['response_labels'],
+        congruency=cached['congruency'],
+        human_stats=compute_human_stats_from_rts(cached['rts']),
+        rt_shape_focus=rt_shape_focus,
+    )
+    return predictions, canonical_results
+
+
 def save_ww_trajectory_samples(
     output_dir: str,
     predictions: Dict[str, np.ndarray],
@@ -1089,6 +1221,7 @@ def save_ww_trajectory_samples(
         traj=predictions['traj'].astype(np.float32),
         pred_choice=predictions['pred_choice'].astype(np.int64),
         target_labels=cached['target_labels'].astype(np.int64),
+        flanker_labels=cached['flanker_labels'].astype(np.int64) if 'flanker_labels' in cached else np.full(len(cached['target_labels']), -1, dtype=np.int64),
         response_labels=cached['response_labels'].astype(np.int64),
         pred_rt=predictions['pred_rt'].astype(np.float32),
         true_rt=cached['rts'].astype(np.float32),
@@ -1126,6 +1259,7 @@ def fit_stage2_from_logits(
     tail_quantiles: Optional[np.ndarray] = None,
     rt_readout_mode: str = 'baseline',
     readout_config: Optional[Dict[str, Any]] = None,
+    selection_config: Optional[Dict[str, Any]] = None,
     smoke_metadata: Optional[Dict[str, Any]] = None,
     behavior_smoke_mode: str = 'baseline',
     behavior_loss_mode: str = 'baseline',
@@ -1142,6 +1276,8 @@ def fit_stage2_from_logits(
     tail_spread_weight: float = 0.18,
     error_slower_weight: float = 0.0,
     congruency_rt_weight: float = 0.18,
+    random_seed: Optional[int] = None,
+    eval_random_seed: Optional[int] = None,
 ):
     print(f"\n{'='*60}")
     print(f"Processing age group from cached logits: {age_group}")
@@ -1178,6 +1314,7 @@ def fit_stage2_from_logits(
     train_target = train_cached['target_labels']
     train_response = train_cached['response_labels']
     train_congruency = train_cached['congruency']
+    train_flanker = train_cached.get('flanker_labels')
     test_target = test_cached['target_labels']
     test_response = test_cached['response_labels']
     test_congruency = test_cached['congruency']
@@ -1194,6 +1331,8 @@ def fit_stage2_from_logits(
         scale_start = perf_counter()
         log_prefix = f"[{age_group} scale {scale_idx}/{total_scales}] "
         print(f"{log_prefix}Beginning optimization")
+        scale_train_seed = None if random_seed is None else int(random_seed + scale_idx * 1000)
+        scale_eval_seed = None if eval_random_seed is None else int(eval_random_seed)
         results, score, params, selection_details = train_stage2_with_scale(
             scale=scale,
             time_steps=time_steps,
@@ -1203,6 +1342,7 @@ def fit_stage2_from_logits(
             target_labels=train_target,
             response_labels=train_response,
             congruency=train_congruency,
+            flanker_labels=train_flanker,
             human_stats=human_stats,
             epochs=epochs,
             lambda_rt=lambda_rt,
@@ -1218,6 +1358,7 @@ def fit_stage2_from_logits(
             tail_quantiles=tail_quantiles,
             rt_readout_mode=rt_readout_mode,
             readout_config=readout_config,
+            selection_config=selection_config,
             behavior_smoke_mode=behavior_smoke_mode,
             behavior_loss_mode=behavior_loss_mode,
             behavior_loss_weight=behavior_loss_weight,
@@ -1233,12 +1374,28 @@ def fit_stage2_from_logits(
             tail_spread_weight=tail_spread_weight,
             error_slower_weight=error_slower_weight,
             congruency_rt_weight=congruency_rt_weight,
+            random_seed=scale_train_seed,
+            eval_random_seed=scale_eval_seed,
             device=device,
             log_prefix=log_prefix,
         )
 
+        test_predictions, canonical_results = evaluate_cached_stage2_params(
+            params=params,
+            scale=scale,
+            time_steps=time_steps,
+            cached=test_cached,
+            device=device,
+            choice_temperature=choice_temperature,
+            rt_readout_mode=rt_readout_mode,
+            readout_config=readout_config,
+            selection_config=selection_config,
+            random_seed=scale_eval_seed,
+            rt_shape_focus=rt_shape_focus,
+        )
+
         ranking_key = behavior_optimal_key(
-            results,
+            canonical_results,
             behavior_smoke_mode=behavior_smoke_mode,
             rt_shape_checkpoint_bias=rt_shape_checkpoint_bias,
             tail_spread_weight=tail_spread_weight,
@@ -1248,23 +1405,13 @@ def fit_stage2_from_logits(
 
         results_list.append({
             'scale': scale,
-            'score': score,
+            'score': float(canonical_results['total_score']),
             'ranking_key': ranking_key,
-            'results': results,
+            'results': canonical_results,
             'params': params,
             'selection_details': selection_details,
+            'selection_results': results,
         })
-
-        test_predictions = infer_predictions_from_params(
-            params=params,
-            scale=scale,
-            time_steps=time_steps,
-            logits=test_cached['logits'],
-            device=device,
-            choice_temperature=choice_temperature,
-            rt_readout_mode=rt_readout_mode,
-            readout_config=readout_config,
-        )
 
         if global_best_key is None or ranking_key > global_best_key:
             global_best_key = ranking_key
@@ -1272,9 +1419,9 @@ def fit_stage2_from_logits(
                 output_dir=output_dir,
                 age_group=age_group,
                 scale=scale,
-                epoch=20,
-                score=score,
-                results=results,
+                epoch=int(selection_details.get('best_epoch', epochs)),
+                score=float(canonical_results['total_score']),
+                results=canonical_results,
                 params=params,
                 pred_rt=test_predictions['pred_rt'],
                 pred_choice=test_predictions['pred_choice'],
@@ -1302,6 +1449,10 @@ def fit_stage2_from_logits(
                     'fixed_threshold': None if fixed_threshold is None else float(fixed_threshold),
                     'fixed_competition_scale': None if fixed_competition_scale is None else float(fixed_competition_scale),
                     'readout_config': readout_config or {},
+                    'selection_config': selection_config or {},
+                    'selection_results': results,
+                    'train_random_seed': scale_train_seed,
+                    'eval_random_seed': scale_eval_seed,
                     **smoke_metadata,
                 },
             )
@@ -1309,8 +1460,8 @@ def fit_stage2_from_logits(
         scale_duration = perf_counter() - scale_start
         print(
             f"{log_prefix}Finished in {scale_duration:.2f}s | "
-            f"Score={score:.4f}, PredMean={results['pred_mean']:.3f}s, "
-            f"Acc={results['model_accuracy']:.4f}, Cong={results['model_congruency_rt_gap']:.4f}"
+            f"Score={canonical_results['total_score']:.4f}, PredMean={canonical_results['pred_mean']:.3f}s, "
+            f"Acc={canonical_results['model_accuracy']:.4f}, Cong={canonical_results['model_congruency_rt_gap']:.4f}"
         )
 
     best_idx = max(range(len(results_list)), key=lambda idx: results_list[idx]['ranking_key'])
@@ -1330,25 +1481,16 @@ def fit_stage2_from_logits(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    best_predictions = infer_predictions_from_params(
+    best_predictions, smoke_metrics = evaluate_cached_stage2_params(
         params=best_config['params'],
         scale=float(best_config['scale']),
         time_steps=time_steps,
-        logits=test_cached['logits'],
+        cached=test_cached,
         device=device,
         choice_temperature=choice_temperature,
         rt_readout_mode=rt_readout_mode,
         readout_config=readout_config,
-    )
-    smoke_eval_stats = compute_human_stats_from_rts(test_cached['rts'])
-    smoke_metrics = evaluate_joint_behavior(
-        pred_rt=best_predictions['pred_rt'],
-        pred_choice=best_predictions['pred_choice'],
-        true_rt=test_cached['rts'],
-        target_labels=test_target,
-        response_labels=test_response,
-        congruency=test_congruency,
-        human_stats=smoke_eval_stats,
+        random_seed=eval_random_seed,
         rt_shape_focus=rt_shape_focus,
     )
     config_payload = {
@@ -1357,7 +1499,9 @@ def fit_stage2_from_logits(
         'score': float(best_config['score']),
         'time_steps': time_steps,
         'results': {k: float(v) if isinstance(v, (np.floating, float)) else v
-                   for k, v in best_config['results'].items()},
+                   for k, v in smoke_metrics.items()},
+        'selection_results': {k: float(v) if isinstance(v, (np.floating, float)) else v
+                              for k, v in best_config.get('selection_results', best_config['results']).items()},
         'rt_readout_mode': rt_readout_mode,
         'behavior_smoke_mode': behavior_smoke_mode,
         'behavior_loss_mode': behavior_loss_mode,
@@ -1373,7 +1517,10 @@ def fit_stage2_from_logits(
         'fixed_threshold': None if fixed_threshold is None else float(fixed_threshold),
         'fixed_competition_scale': None if fixed_competition_scale is None else float(fixed_competition_scale),
         'readout_config': readout_config or {},
+        'selection_config': selection_config or {},
         'trajectory_artifact': 'trajectory_samples.npz' if is_smoke else None,
+        'random_seed': None if random_seed is None else int(random_seed),
+        'eval_random_seed': None if eval_random_seed is None else int(eval_random_seed),
         **smoke_metadata,
     }
 
@@ -1406,6 +1553,7 @@ def fit_stage2_from_logits(
             decision_times_class=best_predictions['decision_times_class'],
             true_rt=test_cached['rts'],
             target_labels=test_target,
+            flanker_labels=test_cached['flanker_labels'] if 'flanker_labels' in test_cached else np.full(len(test_target), -1, dtype=np.int64),
             response_labels=test_response,
             congruency=test_congruency,
             rt_readout_mode=np.array(rt_readout_mode),
@@ -1482,6 +1630,7 @@ def process_age_group(
     train_target = train_dataset.target_labels
     train_response = train_dataset.response_labels
     train_congruency = train_dataset.congruency
+    train_flanker = train_dataset.flanker_labels
     
     # Search for optimal scale
     print("\nSearching for optimal scale...")
@@ -1498,6 +1647,7 @@ def process_age_group(
             target_labels=train_target,
             response_labels=train_response,
             congruency=train_congruency,
+            flanker_labels=train_flanker,
             human_stats=human_stats,
             epochs=20,
             device=device
@@ -1543,14 +1693,22 @@ def process_age_group(
         os.path.join(output_dir, 'train_logits.npz'),
         logits=train_logits,
         rts=train_rts,
-        rts_normalized=train_rts_norm
+        rts_normalized=train_rts_norm,
+        target_labels=train_target,
+        response_labels=train_response,
+        congruency=train_congruency,
+        flanker_labels=train_flanker,
     )
-    
+
     np.savez(
         os.path.join(output_dir, 'test_logits.npz'),
         logits=test_logits,
         rts=test_dataset.rts,
-        rts_normalized=test_dataset.rt_normalized
+        rts_normalized=test_dataset.rt_normalized,
+        target_labels=test_dataset.target_labels,
+        response_labels=test_dataset.response_labels,
+        congruency=test_dataset.congruency,
+        flanker_labels=test_dataset.flanker_labels,
     )
     
     return best_config
@@ -1598,6 +1756,8 @@ def main():
     parser.add_argument('--tail_spread_weight', type=float, default=0.18)
     parser.add_argument('--error_slower_weight', type=float, default=0.0)
     parser.add_argument('--congruency_rt_weight', type=float, default=0.18)
+    parser.add_argument('--seed', type=int, default=7)
+    parser.add_argument('--eval_seed', type=int, default=None)
     parser.add_argument('--smoke_test', action='store_true')
     parser.add_argument('--smoke_fraction', type=float, default=0.15)
     parser.add_argument('--smoke_eval_fraction', type=float, default=0.25)
@@ -1617,6 +1777,7 @@ def main():
     else:
         device = 'cpu'
     print(f"Using device: {device}")
+    set_random_seed(args.seed)
     
     stage1_model_path = str(CHECKPOINTS_TEST_ROOT / 'stage1' / 'best_model.pth')
     if not args.cached_only and not os.path.exists(stage1_model_path):
@@ -1630,6 +1791,8 @@ def main():
             raise ValueError('Smoke test mode is restricted to age_group=20-29.')
         if 'matched' not in str(Path(args.data_root)):
             raise ValueError('Smoke test mode requires the matched 20-29 branch via data_root containing matched.')
+        if args.output_root == rel_to_root(CHECKPOINTS_AGE_GROUPS_ROOT):
+            args.output_root = rel_to_root(CHECKPOINTS_AGE_GROUPS_MATCHED_ROOT)
         if not (0 < args.smoke_fraction <= 1.0 and 0 < args.smoke_eval_fraction <= 1.0):
             raise ValueError('Smoke fractions must be in (0, 1].')
         if args.smoke_eval_min_errors < 0:
@@ -1637,6 +1800,8 @@ def main():
         if args.smoke_eval_max_trials is not None and args.smoke_eval_max_trials <= 0:
             raise ValueError('smoke_eval_max_trials must be positive when provided.')
         set_random_seed(args.smoke_seed)
+
+    eval_seed = int(args.eval_seed if args.eval_seed is not None else args.seed + 1)
     
     age_groups = [args.age_group] if args.age_group else ['20-29', '80-89']
     custom_scales = None
@@ -1858,6 +2023,8 @@ def main():
                 tail_spread_weight=float(args.tail_spread_weight),
                 error_slower_weight=float(args.error_slower_weight),
                 congruency_rt_weight=float(args.congruency_rt_weight),
+                random_seed=int(args.seed),
+                eval_random_seed=eval_seed,
             )
         else:
             result = process_age_group(

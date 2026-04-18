@@ -37,6 +37,7 @@ def save_logits_npz(path: str, logits: np.ndarray, dataset: StimulusDataset):
         rts_normalized=dataset.rt_normalized,
         target_labels=dataset.target_labels,
         response_labels=dataset.response_labels,
+        flanker_labels=dataset.flanker_labels,
         congruency=dataset.congruency,
     )
 
