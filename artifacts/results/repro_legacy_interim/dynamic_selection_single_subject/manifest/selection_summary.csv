@@ -1,0 +1,3 @@
+age_group,pool_trials,pool_users,test_only_users,eligible_subjects,excluded_subjects,selected_subjects,selection_pool
+20-29,728809,12,3,12,0,4,train_plus_test_fallback_due_to_test_only_insufficiency
+80-89,126614,4,1,4,0,4,train_plus_test_fallback_due_to_test_only_insufficiency

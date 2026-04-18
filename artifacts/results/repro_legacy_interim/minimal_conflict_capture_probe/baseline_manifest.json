@@ -1,0 +1,42 @@
+{
+  "entrypoint": "code/scripts/run_minimal_conflict_capture_probe.py",
+  "mode": "audit-baseline",
+  "output_root": "artifacts/results/repro_legacy_interim/minimal_conflict_capture_probe",
+  "seed": 7,
+  "device": "cpu",
+  "choice_temperature": 0.1,
+  "selection_config": {
+    "selection_mode": "dynamic_flanker_suppression",
+    "selection_strength": 0.35,
+    "selection_midpoint_s": 0.18,
+    "selection_tau_s": 0.06,
+    "target_boost": 0.1,
+    "selection_apply_to": "incongruent_only",
+    "dt_ms": 10.0
+  },
+  "insertion_point": "code/scripts/vgg_wongwang_lim.py:84-92 in build_dynamic_stage2_input, where capture_pulse_t contributes to flanker_multiplier_t for dynamic_flanker_suppression",
+  "non_probe_params": {
+    "rt_readout_mode": "baseline",
+    "capture_midpoint_s": 0.05,
+    "capture_tau_s": 0.03,
+    "capture_strength_free_dimension": "capture_strength"
+  },
+  "age_groups": {
+    "20-29": {
+      "test_csv_path": "data/age_groups/20-29/test_data.csv",
+      "test_cache_npz": "artifacts/checkpoints/age_groups/20-29/stage2/test_logits.npz",
+      "stage2_config_path": "artifacts/checkpoints/age_groups/archive_stage2_pre_cached_restart/20-29/best_config.pre_cached_restart.json",
+      "stage2_params_path": "artifacts/checkpoints/age_groups/archive_stage2_pre_cached_restart/20-29/best_model_params.pre_cached_restart.npz",
+      "scale": 0.1,
+      "time_steps": 111
+    },
+    "80-89": {
+      "test_csv_path": "data/age_groups/80-89/test_data.csv",
+      "test_cache_npz": "artifacts/checkpoints/age_groups/80-89/stage2/test_logits.npz",
+      "stage2_config_path": "artifacts/checkpoints/age_groups/80-89/stage2/best_config.json",
+      "stage2_params_path": "artifacts/checkpoints/age_groups/80-89/stage2/best_model_params.npz",
+      "scale": 0.10000000149011612,
+      "time_steps": 193
+    }
+  }
+}

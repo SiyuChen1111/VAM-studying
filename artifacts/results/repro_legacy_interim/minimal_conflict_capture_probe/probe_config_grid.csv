@@ -1,0 +1,8 @@
+probe_tag,is_baseline,capture_strength,capture_midpoint_s,capture_tau_s
+baseline,True,0.0,0.05,0.03
+capture_strength_0.05,False,0.05,0.05,0.03
+capture_strength_0.10,False,0.1,0.05,0.03
+capture_strength_0.15,False,0.15,0.05,0.03
+capture_strength_0.20,False,0.2,0.05,0.03
+capture_strength_0.25,False,0.25,0.05,0.03
+capture_strength_0.30,False,0.3,0.05,0.03

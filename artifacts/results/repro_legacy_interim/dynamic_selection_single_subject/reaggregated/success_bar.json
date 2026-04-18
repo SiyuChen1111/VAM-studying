@@ -1,0 +1,58 @@
+{
+  "weighting": "trial_weighted",
+  "target_metrics": [
+    "earliest_incongruent_caf",
+    "first_delta",
+    "incongruent_error_minus_correct_rt",
+    "incongruent_conditional_tail"
+  ],
+  "n_trials_selected_total": 404725,
+  "metric_deltas": [
+    {
+      "metric": "earliest_incongruent_caf",
+      "excluded": 0,
+      "human": 0.912979132751221,
+      "baseline": 1.0,
+      "sim": 1.0,
+      "before_distance": 0.087020867248779,
+      "after_distance": 0.087020867248779,
+      "improved": 0,
+      "direction_match": null
+    },
+    {
+      "metric": "first_delta",
+      "excluded": 0,
+      "human": 0.028234541416168213,
+      "baseline": 0.0649682879447937,
+      "sim": 0.049430280923843384,
+      "before_distance": 0.03673374652862549,
+      "after_distance": 0.02119573950767517,
+      "improved": 1,
+      "direction_match": null
+    },
+    {
+      "metric": "incongruent_error_minus_correct_rt",
+      "excluded": 0,
+      "human": -0.12349987030029297,
+      "baseline": 0.39688342809677124,
+      "sim": 0.3881000280380249,
+      "before_distance": 0.5203832983970642,
+      "after_distance": 0.5115998983383179,
+      "improved": 1,
+      "direction_match": 0
+    },
+    {
+      "metric": "incongruent_conditional_tail",
+      "excluded": 0,
+      "human": 0.9259999990463257,
+      "baseline": 1.9199999570846558,
+      "sim": 1.9199999570846558,
+      "before_distance": 0.9939999580383301,
+      "after_distance": 0.9939999580383301,
+      "improved": 0,
+      "direction_match": null
+    }
+  ],
+  "critical_metric_rule": "At least one improved metric must be earliest_incongruent_caf or incongruent_error_minus_correct_rt with matching human direction.",
+  "verdict": "HETEROGENEITY-NOT-SUPPORTED"
+}

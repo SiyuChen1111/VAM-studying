@@ -1,0 +1,57 @@
+{
+  "weighting": "trial_weighted",
+  "selected_probe_tag": "capture_strength_0.30",
+  "capture_strength": 0.3,
+  "capture_midpoint_s": 0.05,
+  "capture_tau_s": 0.03,
+  "target_metrics": [
+    "earliest_incongruent_caf",
+    "first_delta",
+    "incongruent_error_minus_correct_rt",
+    "incongruent_conditional_tail"
+  ],
+  "metric_deltas": [
+    {
+      "metric": "earliest_incongruent_caf",
+      "human": 0.7457536629186916,
+      "baseline": 1.0,
+      "probe": 1.0,
+      "before_distance": 0.2542463370813084,
+      "after_distance": 0.2542463370813084,
+      "improved": false,
+      "direction_match": null
+    },
+    {
+      "metric": "first_delta",
+      "human": 0.02139571986010993,
+      "baseline": 0.06470001778596099,
+      "probe": 0.06477763800076587,
+      "before_distance": 0.04330429792585106,
+      "after_distance": 0.043381918140655944,
+      "improved": false,
+      "direction_match": null
+    },
+    {
+      "metric": "incongruent_error_minus_correct_rt",
+      "human": -0.11255520702780251,
+      "baseline": 0.48699171549342485,
+      "probe": 0.4866629157573158,
+      "before_distance": 0.5995469225212273,
+      "after_distance": 0.5992181227851183,
+      "improved": true,
+      "direction_match": false
+    },
+    {
+      "metric": "incongruent_conditional_tail",
+      "human": 0.792671977909175,
+      "baseline": 1.1896354370013187,
+      "probe": 1.1896354370013187,
+      "before_distance": 0.3969634590921437,
+      "after_distance": 0.3969634590921437,
+      "improved": false,
+      "direction_match": null
+    }
+  ],
+  "critical_metric_rule": "At least one improved metric must be earliest_incongruent_caf or incongruent_error_minus_correct_rt with matching human direction.",
+  "verdict": "CAPTURE-PROBE-NOT-SUPPORTED"
+}
