@@ -37,6 +37,7 @@ skills/
 phd-application-plan/
 
 # Runtime / local logs
+logs/
 logs/runtime_archive/
 *.pid
 *.log
@@ -51,3 +52,29 @@ archive/model_assets/
 # Remove these ignores if you want Git to track generated experiment outputs.
 # artifacts/results/
 # artifacts/checkpoints/
+
+# Local compatibility symlinks and generated workspace mirrors
+/Kar
+/scripts
+/results
+/checkpoints_age_groups
+/checkpoints_age_groups_matched
+/checkpoints_test
+/data_age_groups
+/data_age_groups_matched
+/vam
+/vam_data
+
+# Local generated datasets / scratch notes
+/data/
+/draft.md
+
+# Generated research outputs (keep markdown conclusions intentionally tracked)
+archive/checkpoints_experiments/
+archive/response_label_refit_backup/
+archive/stage2_deprecated_2026-03-31/
+artifacts/checkpoints/
+artifacts/results/**/*.npz
+artifacts/results/**/*.json
+artifacts/results/**/*.csv
+artifacts/results/**/*.png
