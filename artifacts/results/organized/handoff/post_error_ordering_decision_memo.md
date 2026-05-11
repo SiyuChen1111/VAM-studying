@@ -1,5 +1,7 @@
 # Post-Error-Ordering Decision Memo
 
+> **Historical status note (2026-05-02):** This memo captures the decision state immediately after the `error_ordering` and early prototype phase. Its recommendation to transition into successor planning has since been superseded by the completed bounded successor-screening bundle under `artifacts/results/rt_model_next_step/`. For current repo-wide status, use `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Scope
 
 This memo synthesizes the saved WW smoke evidence through `WW_error_ordering_behavior_balanced` and chooses the single best next mainline path.

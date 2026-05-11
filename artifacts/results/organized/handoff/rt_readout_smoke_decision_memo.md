@@ -1,5 +1,7 @@
 # RT Readout Smoke Decision Memo
 
+> **Historical status note (2026-05-02):** This memo records the readout-smoke phase and its local recommendation. It is still useful as evidence that readout-only fixes failed, but it is not the current repo-wide next-step document. Later branch-level status is governed by `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Scope
 
 This memo synthesizes the saved smoke-test outputs for the `20-29` matched branch under `checkpoints_age_groups_rtreadout/20-29/smoke/`.

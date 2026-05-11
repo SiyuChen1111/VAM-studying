@@ -2,6 +2,8 @@
 
 This document is the cleanup and duplication map for the current results layout.
 
+Historical references to `results/...` in older memos should be read as compatibility-path aliases for the canonical `artifacts/results/...` tree.
+
 It answers four practical questions:
 
 1. What is the cleanest folder structure for the project **right now**?
@@ -18,7 +20,7 @@ The goal is to improve structure and traceability **without breaking active anal
 Recommended current structure:
 
 ```text
-results/
+artifacts/results/
 ├── age_groups_interim/                         # canonical legacy/interim source directory
 ├── age_groups_response_supervision_interim/   # canonical current-best response-supervision source directory
 ├── age_groups_response_supervision_frozen/    # canonical frozen summary source directory
@@ -47,7 +49,7 @@ Archived organized folders kept for provenance:
 
 ## B. Duplication / cleanup map by current result directory
 
-### 1. `results/proposal_aligned_behavior/`
+### 1. `artifacts/results/proposal_aligned_behavior/`
 
 Status:
 - **Keep as-is** as the canonical source directory for proposal-aligned human behavior outputs.
@@ -67,7 +69,7 @@ Recommendation:
 - Leave source directory untouched.
 - Treat the organized copy as the preferred read layer.
 
-### 2. `results/age_groups_response_supervision_interim/`
+### 2. `artifacts/results/age_groups_response_supervision_interim/`
 
 Status:
 - **Keep as-is** as the canonical source directory for current-best response-supervision outputs.
@@ -82,17 +84,17 @@ Status:
 | `figureRS2_response_supervision_multipanel.png` | `organized/current_best_response_supervision/figureRS2_response_supervision_multipanel.png` | Keep + copy | Broader model comparison figure |
 | `figureRS3A_agegroup_accuracy_human_vs_model.png` | `organized/current_best_response_supervision/figureRS3A_agegroup_accuracy_human_vs_model.png` | Keep + copy | Accuracy-specific comparison |
 | `figureRS3B_agegroup_congruency_gap_human_vs_model.png` | `organized/current_best_response_supervision/figureRS3B_agegroup_congruency_gap_human_vs_model.png` | Keep + copy | Congruency-gap comparison |
-| `figureRS3_agegroup_human_vs_model.png` | no organized copy | Archived in source dir | Older combined comparison figure; moved to `results/age_groups_response_supervision_interim/archive/` |
+| `figureRS3_agegroup_human_vs_model.png` | no organized copy | Archived in source dir | Older combined comparison figure; moved to `artifacts/results/age_groups_response_supervision_interim/archive/` |
 | `response_supervision_multipanel_summary.csv` | no organized copy | Leave untouched but document | Useful provenance table, not a primary entry point |
-| `figureRS1_response_supervision_eval05_summary.png` | no organized copy | Archived in source dir | Earlier eval snapshot; moved to `results/age_groups_response_supervision_interim/archive/` |
-| `response_supervision_eval05_comparison.csv` | no organized copy | Archived in source dir | Earlier eval snapshot; moved to `results/age_groups_response_supervision_interim/archive/` |
+| `figureRS1_response_supervision_eval05_summary.png` | no organized copy | Archived in source dir | Earlier eval snapshot; moved to `artifacts/results/age_groups_response_supervision_interim/archive/` |
+| `response_supervision_eval05_comparison.csv` | no organized copy | Archived in source dir | Earlier eval snapshot; moved to `artifacts/results/age_groups_response_supervision_interim/archive/` |
 
 Recommendation:
 - Keep primary source files in place.
 - Prefer the organized copy for reading.
-- The eval05 files and older combined summary figure are now grouped under `results/age_groups_response_supervision_interim/archive/`.
+- The eval05 files and older combined summary figure are now grouped under `artifacts/results/age_groups_response_supervision_interim/archive/`.
 
-### 3. `results/age_groups_response_supervision_frozen/`
+### 3. `artifacts/results/age_groups_response_supervision_frozen/`
 
 Status:
 - **Keep as-is**.
@@ -108,7 +110,7 @@ Recommendation:
 - Leave untouched.
 - Continue presenting these as frozen summaries nested under the current-best response-supervision view.
 
-### 4. `results/age_groups_interim/`
+### 4. `artifacts/results/age_groups_interim/`
 
 Status:
 - **Keep as-is** as the canonical legacy/interim source directory.
@@ -133,7 +135,7 @@ Recommendation:
 - Keep source directory intact.
 - Do not promote any file from here above human-side or corrected-supervision outputs.
 
-### 5. `results/organized/`
+### 5. `artifacts/results/organized/`
 
 Status:
 - **Keep and expand** as the main navigation layer.
@@ -154,13 +156,13 @@ Status:
 
 Recommended reading order:
 
-1. `results/organized/handoff/CURRENT_STATUS.md`
-2. `results/organized/README.md`
-3. `results/organized/proposal_aligned_human_behavior/integrated_current_results_analysis.md`
-4. `results/organized/proposal_aligned_human_behavior/figureB2_human_multipanel_20_29_vs_80_89.png`
-5. `results/organized/proposal_aligned_human_behavior/figureP2_human_signature_summary.png`
-6. `results/organized/current_best_response_supervision/response_supervision_current_comparison.csv`
-7. `results/organized/current_best_response_supervision/response_supervision_interim_memo.md`
+1. `artifacts/results/organized/handoff/CURRENT_STATUS.md`
+2. `artifacts/results/organized/README.md`
+3. `artifacts/results/organized/proposal_aligned_human_behavior/integrated_current_results_analysis.md`
+4. `artifacts/results/organized/proposal_aligned_human_behavior/figureB2_human_multipanel_20_29_vs_80_89.png`
+5. `artifacts/results/organized/proposal_aligned_human_behavior/figureP2_human_signature_summary.png`
+6. `artifacts/results/organized/current_best_response_supervision/response_supervision_current_comparison.csv`
+7. `artifacts/results/organized/current_best_response_supervision/response_supervision_interim_memo.md`
 
 These are the best entry points because together they show:
 - the project question,
@@ -176,10 +178,10 @@ without over-promoting older interim artifacts.
 
 Treat the following as **legacy reference only**:
 
-- everything under `results/organized/legacy_interim_reference/`
-- everything under `results/age_groups_interim/` unless doing provenance tracing
-- `results/organized/archive/age_groups_raw/`
-- `results/organized/archive/standalone_figures/`
+- everything under `artifacts/results/organized/legacy_interim_reference/`
+- everything under `artifacts/results/age_groups_interim/` unless doing provenance tracing
+- `artifacts/results/organized/archive/age_groups_raw/`
+- `artifacts/results/organized/archive/standalone_figures/`
 - especially:
   - `figureA4_interim_trajectory_geometry.png`
   - `figureA4_interim_trajectory_spread.csv`
@@ -196,28 +198,28 @@ Important interpretation rule:
 
 | Path | Why removal is safe | Canonical replacement |
 |---|---|---|
-| `results/organized/.DS_Store` | OS-generated metadata file with no scientific or workflow value | none needed |
+| `artifacts/results/organized/.DS_Store` | OS-generated metadata file with no scientific or workflow value | none needed |
 
 ### Already archived safely
 
 | Path | Why archive instead of delete | Canonical replacement |
 |---|---|---|
-| `results/age_groups_response_supervision_interim/archive/figureRS1_response_supervision_eval05_summary.png` | Older eval snapshot; superseded by current summary figure | `results/organized/current_best_response_supervision/figureRS1_response_supervision_summary.png` |
-| `results/age_groups_response_supervision_interim/archive/response_supervision_eval05_comparison.csv` | Older eval snapshot; superseded by current comparison table | `results/organized/current_best_response_supervision/response_supervision_current_comparison.csv` |
-| `results/age_groups_response_supervision_interim/archive/figureRS3_agegroup_human_vs_model.png` | Older combined view; split A/B figures are clearer in organized layer | `results/organized/current_best_response_supervision/figureRS3A_agegroup_accuracy_human_vs_model.png` and `figureRS3B_agegroup_congruency_gap_human_vs_model.png` |
-| `results/organized/archive/age_groups_raw/` | Older organized mirror already moved out of primary navigation | `results/organized/README.md` + the four primary organized folders |
-| `results/organized/archive/standalone_figures/` | Convenience figures already moved out of primary navigation | `results/organized/proposal_aligned_human_behavior/` and `results/organized/current_best_response_supervision/` |
+| `artifacts/results/age_groups_response_supervision_interim/archive/figureRS1_response_supervision_eval05_summary.png` | Older eval snapshot; superseded by current summary figure | `artifacts/results/organized/current_best_response_supervision/figureRS1_response_supervision_summary.png` |
+| `artifacts/results/age_groups_response_supervision_interim/archive/response_supervision_eval05_comparison.csv` | Older eval snapshot; superseded by current comparison table | `artifacts/results/organized/current_best_response_supervision/response_supervision_current_comparison.csv` |
+| `artifacts/results/age_groups_response_supervision_interim/archive/figureRS3_agegroup_human_vs_model.png` | Older combined view; split A/B figures are clearer in organized layer | `artifacts/results/organized/current_best_response_supervision/figureRS3A_agegroup_accuracy_human_vs_model.png` and `figureRS3B_agegroup_congruency_gap_human_vs_model.png` |
+| `artifacts/results/organized/archive/age_groups_raw/` | Older organized mirror already moved out of primary navigation | `artifacts/results/organized/README.md` + the four primary organized folders |
+| `artifacts/results/organized/archive/standalone_figures/` | Convenience figures already moved out of primary navigation | `artifacts/results/organized/proposal_aligned_human_behavior/` and `artifacts/results/organized/current_best_response_supervision/` |
 
 ### Leave untouched but document
 
 These are not primary entry points, but they still may matter for provenance:
 
-- `results/age_groups_response_supervision_interim/response_supervision_multipanel_summary.csv`
-- `results/age_groups_interim/interim_vs_final_summary.csv`
-- `results/age_groups_interim/interim_vs_final_summary.md`
-- `results/age_groups_interim/current_stage_conclusion_memo.md`
-- `results/age_groups_interim/figureB1_80_89_multipanel_profile.png`
-- `results/organized/archive/age_groups_raw/`
+- `artifacts/results/age_groups_response_supervision_interim/response_supervision_multipanel_summary.csv`
+- `artifacts/results/age_groups_interim/interim_vs_final_summary.csv`
+- `artifacts/results/age_groups_interim/interim_vs_final_summary.md`
+- `artifacts/results/age_groups_interim/current_stage_conclusion_memo.md`
+- `artifacts/results/age_groups_interim/figureB1_80_89_multipanel_profile.png`
+- `artifacts/results/organized/archive/age_groups_raw/`
 
 Recommendation:
 - do not delete these unless the user explicitly asks for a provenance-pruning pass
@@ -229,7 +231,7 @@ Recommendation:
 
 ### 1. What is the cleanest folder structure for the project right now?
 
-Keep the four original result directories as canonical source/write locations, and treat `results/organized/` as the single curated navigation layer with four stable sections:
+Keep the four original result directories as canonical source/write locations, and treat `artifacts/results/organized/` as the single curated navigation layer with four stable sections:
 - `current_best_response_supervision/`
 - `proposal_aligned_human_behavior/`
 - `legacy_interim_reference/`
@@ -237,26 +239,26 @@ Keep the four original result directories as canonical source/write locations, a
 
 ### 2. Which files are the best entry points for someone trying to understand current progress?
 
-- `results/organized/handoff/CURRENT_STATUS.md`
-- `results/organized/proposal_aligned_human_behavior/integrated_current_results_analysis.md`
-- `results/organized/proposal_aligned_human_behavior/figureB2_human_multipanel_20_29_vs_80_89.png`
-- `results/organized/proposal_aligned_human_behavior/figureP2_human_signature_summary.png`
-- `results/organized/current_best_response_supervision/response_supervision_current_comparison.csv`
-- `results/organized/current_best_response_supervision/response_supervision_interim_memo.md`
+- `artifacts/results/organized/handoff/CURRENT_STATUS.md`
+- `artifacts/results/organized/proposal_aligned_human_behavior/integrated_current_results_analysis.md`
+- `artifacts/results/organized/proposal_aligned_human_behavior/figureB2_human_multipanel_20_29_vs_80_89.png`
+- `artifacts/results/organized/proposal_aligned_human_behavior/figureP2_human_signature_summary.png`
+- `artifacts/results/organized/current_best_response_supervision/response_supervision_current_comparison.csv`
+- `artifacts/results/organized/current_best_response_supervision/response_supervision_interim_memo.md`
 
 ### 3. Which files should be treated as legacy references only?
 
-- everything in `results/organized/legacy_interim_reference/`
-- everything in `results/organized/archive/age_groups_raw/`
-- everything in `results/organized/archive/standalone_figures/`
+- everything in `artifacts/results/organized/legacy_interim_reference/`
+- everything in `artifacts/results/organized/archive/age_groups_raw/`
+- everything in `artifacts/results/organized/archive/standalone_figures/`
 - especially `figureA4_interim_trajectory_geometry.png`
-- and, by provenance, the original `results/age_groups_interim/` directory
+- and, by provenance, the original `artifacts/results/age_groups_interim/` directory
 
 ### 4. What, if anything, can be safely archived or removed?
 
 Safely removed now:
-- `results/organized/.DS_Store`
+- `artifacts/results/organized/.DS_Store`
 
 Safely archivable later, but best left untouched unless the user requests an archive pass:
-- `results/age_groups_response_supervision_interim/response_supervision_multipanel_summary.csv`
-- no further organized-folder archive move is required right now because `age_groups_raw/` and `standalone_figures/` are already archived under `results/organized/archive/`
+- `artifacts/results/age_groups_response_supervision_interim/response_supervision_multipanel_summary.csv`
+- no further organized-folder archive move is required right now because `age_groups_raw/` and `standalone_figures/` are already archived under `artifacts/results/organized/archive/`

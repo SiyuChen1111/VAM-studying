@@ -39,6 +39,7 @@ from vgg_wongwang_lim import (
     WWWrapper,
     apply_stage2_input_transform,
     build_dynamic_stage2_input,
+    compute_behavioral_losses,
     compute_legacy_choice_logits,
     compute_rt_readout,
 )
@@ -89,6 +90,8 @@ def set_random_seed(seed: int):
 
 
 def build_torch_generator(seed: int, device: torch.device) -> Optional[torch.Generator]:
+    if device.type not in {'cpu', 'cuda'}:
+        return None
     generator_device = 'cuda' if device.type == 'cuda' else 'cpu'
     try:
         generator = torch.Generator(device=generator_device)
@@ -262,6 +265,7 @@ class StimulusDataset(Dataset):
         self.flanker_labels = self.data['flanker_direction'].map(lambda x: DIRECTION_MAP[x]).to_numpy(dtype=np.int64)
         self.congruency = (self.target_labels != self.flanker_labels).astype(np.int64)
         self.correct = (self.target_labels == self.response_labels).astype(np.float32)
+        self.missing_image_paths = []
 
         unique_paths = sorted(set(self.image_paths.tolist()))
         self.image_cache = {}
@@ -272,6 +276,9 @@ class StimulusDataset(Dataset):
                 self.image_cache[path] = self.transform(image)
             else:
                 self.image_cache[path] = zero_image
+                self.missing_image_paths.append(path)
+        self.missing_image_count = int(len(self.missing_image_paths))
+        self.missing_image_rate = float(self.missing_image_count / max(len(unique_paths), 1))
 
         print(f"Loaded {len(self.data)} samples from {csv_path} with {len(self.image_cache)} cached images")
     
@@ -286,6 +293,7 @@ class StimulusDataset(Dataset):
             'rt_normalized': torch.tensor(self.rt_normalized[idx], dtype=torch.float32),
             'target_label': torch.tensor(self.target_labels[idx], dtype=torch.long),
             'response_label': torch.tensor(self.response_labels[idx], dtype=torch.long),
+            'flanker_label': torch.tensor(self.flanker_labels[idx], dtype=torch.long),
             'congruency': torch.tensor(self.congruency[idx], dtype=torch.long),
             'correct': torch.tensor(self.correct[idx], dtype=torch.float32)
         }
@@ -432,7 +440,7 @@ def compute_stage2_outputs(
     target_labels: Optional[torch.Tensor] = None,
     flanker_labels: Optional[torch.Tensor] = None,
     random_seed: Optional[int] = None,
-):
+    ):
     eval_generator = None
     if random_seed is not None:
         eval_generator = build_torch_generator(int(random_seed), logits_batch.device)
@@ -449,12 +457,11 @@ def compute_stage2_outputs(
     evidence_traj = trajectory - threshold
     choice_logits = compute_legacy_choice_logits(evidence_traj, choice_temperature)
 
-    if rt_readout_mode == 'baseline':
-        final_dt = decision_times.min(dim=1)[0]
-        readout = compute_rt_readout('baseline', evidence_traj, readout_config=readout_config)
-    else:
-        readout = compute_rt_readout(rt_readout_mode, evidence_traj, readout_config=readout_config)
-        final_dt = readout['pred_rt']
+    effective_readout_config = dict(readout_config or {})
+    effective_readout_config.setdefault('t0_mode', 'disabled')
+    effective_readout_config['t0_seconds'] = model.t0_seconds
+    readout = compute_rt_readout(rt_readout_mode, evidence_traj, readout_config=effective_readout_config)
+    final_dt = readout['pred_rt']
 
     readout = dict(readout)
     readout['traj'] = trajectory
@@ -617,6 +624,17 @@ def behavior_optimal_key(
             float(results['accuracy_score']),
         )
 
+    if behavior_smoke_mode == 'rt_response_only':
+        return (
+            1,
+            float(results['mean_median_score']),
+            float(results['response_agreement']),
+            float(results['quantile_score']),
+            float(results['rt_shape_score']),
+            -abs(float(results['pred_mean']) - float(results['true_mean'])),
+            -abs(float(results['pred_median']) - float(results['true_median'])),
+        )
+
     if behavior_smoke_mode != 'checkpoint_tail_focus':
         raise ValueError(f"Unknown behavior_smoke_mode: {behavior_smoke_mode}")
 
@@ -700,9 +718,12 @@ def train_stage2_with_scale(
     lambda_cong: float = 0.3,
     lambda_tail: float = 0.0,
     lambda_pileup: float = 0.0,
+    behavioral_loss_config: Optional[Dict[str, Any]] = None,
     fixed_noise_ampa: Optional[float] = None,
     fixed_threshold: Optional[float] = None,
     fixed_competition_scale: Optional[float] = None,
+    t0_mode: str = 'disabled',
+    t0_seconds: float = 0.0,
     congruency_margin: float = 0.01,
     device: str = 'cpu',
     log_prefix: str = '',
@@ -737,6 +758,14 @@ def train_stage2_with_scale(
     # Create model
     model = WWWrapper(n_classes=4, dt=dt, time_steps=time_steps)
     model.scale = torch.tensor(scale, dtype=torch.float32)
+    valid_t0_modes = {'disabled', 'fixed_global', 'fit_global', 'fit_age_group'}
+    if t0_mode not in valid_t0_modes:
+        raise ValueError(f"Unknown t0_mode: {t0_mode}")
+    if float(t0_seconds) < 0.0:
+        raise ValueError('t0_seconds must be non-negative.')
+    with torch.no_grad():
+        model.t0_seconds.copy_(torch.tensor(float(t0_seconds), dtype=torch.float32))
+    model.t0_seconds.requires_grad_(t0_mode in {'fit_global', 'fit_age_group'})
     if fixed_noise_ampa is not None:
         with torch.no_grad():
             model.ww.noise_ampa.copy_(torch.tensor(float(fixed_noise_ampa), dtype=torch.float32))
@@ -884,6 +913,20 @@ def train_stage2_with_scale(
             else:
                 rt_moment_anchor_loss = torch.tensor(0.0, device=device)
 
+            if behavioral_loss_config is not None:
+                behavioral_losses = compute_behavioral_losses(
+                    pred_rt=final_dt,
+                    pred_choice=choice_logits.argmax(dim=1),
+                    choice_probs=F.softmax(choice_logits, dim=1),
+                    target_labels=batch_target,
+                    response_labels=batch_response,
+                    true_rt=batch_rt,
+                    config=behavioral_loss_config,
+                )
+                behavioral_total = behavioral_losses['loss']
+            else:
+                behavioral_total = torch.tensor(0.0, device=device)
+
             loss = (
                 lambda_rt * rt_loss
                 + lambda_choice * choice_loss
@@ -894,6 +937,7 @@ def train_stage2_with_scale(
                 + rt_distribution_loss_weight * rt_distribution_loss
                 + conditional_rt_distribution_loss_weight * conditional_rt_distribution_loss
                 + rt_moment_anchor_loss_weight * rt_moment_anchor_loss
+                + behavioral_total
             )
             loss.backward()
             optimizer.step()
@@ -1254,6 +1298,8 @@ def fit_stage2_from_logits(
     fixed_noise_ampa: Optional[float] = None,
     fixed_threshold: Optional[float] = None,
     fixed_competition_scale: Optional[float] = None,
+    t0_mode: str = 'disabled',
+    t0_seconds: float = 0.0,
     time_steps_factor: float = 1.0,
     rt_shape_focus: bool = False,
     tail_quantiles: Optional[np.ndarray] = None,
@@ -1276,6 +1322,7 @@ def fit_stage2_from_logits(
     tail_spread_weight: float = 0.18,
     error_slower_weight: float = 0.0,
     congruency_rt_weight: float = 0.18,
+    behavioral_loss_config: Optional[Dict[str, Any]] = None,
     random_seed: Optional[int] = None,
     eval_random_seed: Optional[int] = None,
 ):
@@ -1300,6 +1347,8 @@ def fit_stage2_from_logits(
         print(f"Fixed threshold: {fixed_threshold}")
     if fixed_competition_scale is not None:
         print(f"Fixed competition scale: {fixed_competition_scale}")
+    print(f"t0 mode: {t0_mode}")
+    print(f"t0 seconds: {float(t0_seconds):.6f}")
 
     smoke_metadata = smoke_metadata or {}
     is_smoke = bool(smoke_metadata.get('smoke_test', False))
@@ -1353,6 +1402,8 @@ def fit_stage2_from_logits(
             fixed_noise_ampa=fixed_noise_ampa,
             fixed_threshold=fixed_threshold,
             fixed_competition_scale=fixed_competition_scale,
+            t0_mode=t0_mode,
+            t0_seconds=t0_seconds,
             choice_temperature=choice_temperature,
             rt_shape_focus=rt_shape_focus,
             tail_quantiles=tail_quantiles,
@@ -1374,6 +1425,7 @@ def fit_stage2_from_logits(
             tail_spread_weight=tail_spread_weight,
             error_slower_weight=error_slower_weight,
             congruency_rt_weight=congruency_rt_weight,
+            behavioral_loss_config=behavioral_loss_config,
             random_seed=scale_train_seed,
             eval_random_seed=scale_eval_seed,
             device=device,
@@ -1448,6 +1500,8 @@ def fit_stage2_from_logits(
                     'rt_distribution_sigma': float(rt_distribution_sigma),
                     'fixed_threshold': None if fixed_threshold is None else float(fixed_threshold),
                     'fixed_competition_scale': None if fixed_competition_scale is None else float(fixed_competition_scale),
+                    't0_mode': t0_mode,
+                    't0_seconds': float(t0_seconds),
                     'readout_config': readout_config or {},
                     'selection_config': selection_config or {},
                     'selection_results': results,
@@ -1514,8 +1568,11 @@ def fit_stage2_from_logits(
         'rt_moment_anchor_loss_weight': float(rt_moment_anchor_loss_weight),
         'rt_distribution_bins': int(rt_distribution_bins),
         'rt_distribution_sigma': float(rt_distribution_sigma),
+        'fixed_noise_ampa': None if fixed_noise_ampa is None else float(fixed_noise_ampa),
         'fixed_threshold': None if fixed_threshold is None else float(fixed_threshold),
         'fixed_competition_scale': None if fixed_competition_scale is None else float(fixed_competition_scale),
+        't0_mode': t0_mode,
+        't0_seconds': float(t0_seconds),
         'readout_config': readout_config or {},
         'selection_config': selection_config or {},
         'trajectory_artifact': 'trajectory_samples.npz' if is_smoke else None,
@@ -1732,11 +1789,13 @@ def main():
     parser.add_argument('--fixed_noise_ampa', type=float, help='If set, override and freeze Wong-Wang noise_ampa')
     parser.add_argument('--fixed_threshold', type=float, help='If set, override and freeze Wong-Wang threshold')
     parser.add_argument('--fixed_competition_scale', type=float, help='If set, scale and freeze Wong-Wang off-diagonal competition weights')
+    parser.add_argument('--t0_mode', choices=['disabled', 'fixed_global', 'fit_global', 'fit_age_group'], default='disabled')
+    parser.add_argument('--t0_seconds', type=float, default=0.0, help='Explicit non-decision-time term in seconds')
     parser.add_argument('--choice_temperature', type=float, default=0.05, help='Choice temperature for logits')
     parser.add_argument('--time_steps_factor', type=float, default=1.0, help='Multiplier on time_steps derived from human percentile_99')
     parser.add_argument('--rt_shape_focus', action='store_true', help='Upweight skewness and tail coverage in checkpoint selection')
     parser.add_argument('--tail_quantiles', type=str, default='0.9,0.95,0.99', help='Comma-separated quantiles for tail loss')
-    parser.add_argument('--rt_readout_mode', choices=['baseline', 'soft_hazard', 'urgency', 'noisy_readout'], default='baseline')
+    parser.add_argument('--rt_readout_mode', choices=['baseline', 'soft_hazard', 'urgency', 'soft_index', 'noisy_readout'], default='baseline')
     parser.add_argument('--urgency_type', choices=['collapsing_bound', 'additive_urgency'], default='additive_urgency')
     parser.add_argument('--urgency_start', type=float, default=0.80)
     parser.add_argument('--urgency_slope', type=float, default=0.25)
@@ -1759,6 +1818,7 @@ def main():
     parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--eval_seed', type=int, default=None)
     parser.add_argument('--smoke_test', action='store_true')
+    parser.add_argument('--smoke_eval', action='store_true', help='Alias for smoke_test to match branch smoke commands')
     parser.add_argument('--smoke_fraction', type=float, default=0.15)
     parser.add_argument('--smoke_eval_fraction', type=float, default=0.25)
     parser.add_argument('--smoke_epochs', type=int, default=5)
@@ -1768,7 +1828,13 @@ def main():
     parser.add_argument('--smoke_eval_balance_congruency', action='store_true')
     parser.add_argument('--smoke_eval_max_trials', type=int, default=None)
     parser.add_argument('--smoke_eval_seed', type=int, default=None)
+    parser.add_argument('--experiment_name', type=str, default=None, help='Explicit smoke experiment directory name')
     args = parser.parse_args()
+
+    if args.smoke_eval:
+        args.smoke_test = True
+    if float(args.t0_seconds) < 0.0:
+        raise ValueError('t0_seconds must be non-negative.')
 
     if torch.backends.mps.is_available():
         device = 'mps'
@@ -1815,7 +1881,7 @@ def main():
     for age_group in age_groups:
         data_dir = os.path.join(args.data_root, age_group)
         ww_variant = args.behavior_smoke_mode if args.behavior_loss_mode == 'baseline' else args.behavior_loss_mode
-        experiment_name = (
+        generated_experiment_name = (
             f"WW_rt_dist_{args.rt_distribution_loss_mode}_noise_anchor{'' if args.smoke_eval_mode == 'random' else f'_{args.smoke_eval_mode}'}"
             if args.smoke_test
             and args.rt_readout_mode == 'baseline'
@@ -1888,8 +1954,11 @@ def main():
             if args.smoke_test and args.rt_readout_mode == 'urgency'
             else args.rt_readout_mode if args.smoke_test else 'stage2'
         )
+        experiment_name = args.experiment_name or generated_experiment_name
         output_dir = (
-            os.path.join(args.output_root, age_group, 'smoke', experiment_name)
+            os.path.join(args.output_root, experiment_name)
+            if args.smoke_test and args.experiment_name
+            else os.path.join(args.output_root, age_group, 'smoke', experiment_name)
             if args.smoke_test
             else os.path.join(args.output_root, age_group, 'stage2')
         )
@@ -1940,6 +2009,8 @@ def main():
                     'fixed_noise_ampa': None if args.fixed_noise_ampa is None else float(args.fixed_noise_ampa),
                     'fixed_threshold': None if args.fixed_threshold is None else float(args.fixed_threshold),
                     'fixed_competition_scale': None if args.fixed_competition_scale is None else float(args.fixed_competition_scale),
+                    't0_mode': args.t0_mode,
+                    't0_seconds': float(args.t0_seconds),
                     'smoke_seed': int(args.smoke_seed),
                     'smoke_fraction': float(args.smoke_fraction),
                     'smoke_eval_fraction': float(args.smoke_eval_fraction),
@@ -1949,8 +2020,8 @@ def main():
                     'smoke_eval_min_errors': int(args.smoke_eval_min_errors),
                     'smoke_eval_balance_congruency': bool(args.smoke_eval_balance_congruency),
                     'smoke_eval_max_trials': None if args.smoke_eval_max_trials is None else int(args.smoke_eval_max_trials),
-                    'behavior_smoke_mode': args.behavior_smoke_mode,
-                    'behavior_loss_mode': args.behavior_loss_mode,
+                    'behavior_smoke_mode': args.smoke_eval_mode,
+                    'behavior_loss_mode': 'response_labels_cached_logits',
                     'behavior_loss_weight': float(args.behavior_loss_weight),
                     'rt_distribution_loss_mode': args.rt_distribution_loss_mode,
                     'rt_distribution_loss_weight': float(args.rt_distribution_loss_weight),
@@ -1991,6 +2062,8 @@ def main():
                 fixed_noise_ampa=args.fixed_noise_ampa,
                 fixed_threshold=args.fixed_threshold,
                 fixed_competition_scale=args.fixed_competition_scale,
+                t0_mode=args.t0_mode,
+                t0_seconds=float(args.t0_seconds),
                 choice_temperature=args.choice_temperature,
                 time_steps_factor=args.time_steps_factor,
                 rt_shape_focus=args.rt_shape_focus,
@@ -2006,6 +2079,7 @@ def main():
                     'urgency_start': float(args.urgency_start),
                     'urgency_slope': float(args.urgency_slope),
                     'urgency_floor': float(args.urgency_floor),
+                    't0_mode': args.t0_mode,
                 },
                 smoke_metadata=smoke_metadata,
                 behavior_smoke_mode=args.behavior_smoke_mode,

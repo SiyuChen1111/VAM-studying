@@ -1,5 +1,7 @@
 # WW Behavior-Balanced Decision Memo
 
+> **Historical status note (2026-05-02):** This memo captures the decision state for the behavior-balanced WW smoke phase. Its “Recommendation” section is historical phase-local guidance only and should not be read as the current repo-wide next-step decision. For current successor-screening status, use `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Scope
 
 This memo evaluates the latest saved behavior-balanced WW smoke outputs under:

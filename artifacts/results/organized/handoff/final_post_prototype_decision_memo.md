@@ -1,5 +1,7 @@
 # Final Post-Prototype Decision Memo
 
+> **Historical status note (2026-05-02):** This memo records the decision state after the first structured post-WW prototype stage. Its recommendation language is still useful as phase-local history, but it predates the later bounded successor-screening bundle under `artifacts/results/rt_model_next_step/`. For the current branch-level outcome, use `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Scope
 
 This memo is the final post-prototype decision point after:

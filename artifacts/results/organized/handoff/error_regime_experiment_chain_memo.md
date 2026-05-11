@@ -1,5 +1,7 @@
 # Error-Regime Experiment Chain Memo
 
+> **Historical technical-evidence note (2026-05-02):** This memo remains the key detailed record of the WW error-regime branch and should still be used for technical reconstruction of that phase. It is not, by itself, the later repo-wide successor-screening verdict. For the bounded branch-level outcome after this phase, use `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Purpose
 
 This memo summarizes the full experimental chain aimed at pushing the current WW pipeline into a **human-like error regime** while preserving useful RT-distribution structure.

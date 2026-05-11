@@ -27,8 +27,26 @@ from typing import Tuple, Optional, Dict, Any, cast, Union
 import torchvision.models as models
 
 
-def apply_stage2_input_transform(logits: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    return F.relu(logits * scale)
+def apply_stage2_input_transform(
+    logits: torch.Tensor,
+    scale: torch.Tensor,
+    transform_mode: str = 'relu',
+    softplus_center: float = 0.0,
+) -> torch.Tensor:
+    """Map Stage-1 logits into non-negative Stage-2 input.
+
+    Modes:
+        relu             – original  ReLU(logits * scale)  (default)
+        softplus_centered – softplus(logits * scale - center)
+                           No dead zone; center shifts the
+                           operating point away from saturation.
+    """
+    scaled = logits * scale
+    if transform_mode == 'relu':
+        return F.relu(scaled)
+    if transform_mode == 'softplus_centered':
+        return F.softplus(scaled - softplus_center)
+    raise ValueError(f"Unknown transform_mode: {transform_mode}")
 
 
 def _build_alpha_pulse(time_axis: torch.Tensor, peak_s: float) -> torch.Tensor:
@@ -45,8 +63,14 @@ def build_dynamic_stage2_input(
     target_labels: Optional[torch.Tensor] = None,
     flanker_labels: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    transformed = apply_stage2_input_transform(logits, scale)
     config = config or {}
+    transform_mode = str(config.get('transform_mode', 'relu'))
+    softplus_center = float(config.get('softplus_center', 0.0))
+    transformed = apply_stage2_input_transform(
+        logits, scale,
+        transform_mode=transform_mode,
+        softplus_center=softplus_center,
+    )
     selection_mode = str(config.get('selection_mode', 'baseline'))
     if selection_mode == 'baseline':
         return transformed, {}
@@ -156,6 +180,41 @@ def compute_baseline_readout(
         'decision_indices': decision_indices,
         'decision_times': decision_times,
         'winner_idx': winner_idx,
+    }
+
+
+def _resolve_t0_seconds(
+    config: Optional[Dict[str, Any]],
+    reference_tensor: torch.Tensor,
+) -> Tuple[torch.Tensor, str]:
+    cfg = config or {}
+    t0_mode = str(cfg.get('t0_mode', 'disabled'))
+    valid_modes = {'disabled', 'fixed_global', 'fit_global', 'fit_age_group'}
+    if t0_mode not in valid_modes:
+        raise ValueError(f"Unknown t0_mode: {t0_mode}")
+
+    raw_value = cfg.get('t0_seconds', 0.0)
+    if isinstance(raw_value, torch.Tensor):
+        t0_seconds = raw_value.to(device=reference_tensor.device, dtype=reference_tensor.dtype)
+    else:
+        t0_seconds = torch.as_tensor(raw_value, device=reference_tensor.device, dtype=reference_tensor.dtype)
+    if t0_mode == 'disabled':
+        t0_seconds = torch.zeros_like(t0_seconds)
+    else:
+        t0_seconds = torch.clamp(t0_seconds, min=0.0)
+    return t0_seconds, t0_mode
+
+
+def apply_t0_readout_shift(
+    pred_rt: torch.Tensor,
+    readout_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    t0_seconds, t0_mode = _resolve_t0_seconds(readout_config, pred_rt)
+    shifted_rt = pred_rt + t0_seconds
+    return {
+        'pred_rt': shifted_rt,
+        't0_seconds': t0_seconds,
+        't0_mode': t0_mode,
     }
 
 
@@ -278,51 +337,248 @@ def compute_urgency_readout(
     }
 
 
+def compute_soft_index_readout(
+    evidence_traj: torch.Tensor,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, torch.Tensor]:
+    """Soft-index selection readout — decouples *which* class from *when*.
+
+    Inspired by the RNN/LSTM RTify pipeline (RNN_decision.py /
+    AlexNet_BN_LSTM_sup_2.py).  For each class we place a Gaussian bump
+    around its first-crossing time, then read out the evidence at that
+    soft-indexed position.  Choice probabilities come from softmax over
+    class evidence; RT is a probability-weighted average of class decision
+    times.
+
+    Key parameters (via config):
+        sigma_s: width of the Gaussian soft-index in seconds (default 0.05)
+        choice_temperature: temperature for the choice softmax (default 0.10)
+    """
+    config = config or {}
+    dt_ms = float(config.get('dt_ms', 10.0))
+    sigma_s = float(config.get('sigma_s', 0.05))
+    sigma_steps = max(sigma_s / (dt_ms / 1000.0), 0.5)  # at least half a step
+    choice_temperature = max(float(config.get('choice_temperature', 0.10)), 1e-6)
+
+    baseline = compute_baseline_readout(evidence_traj, readout_config=config)
+    decision_indices = baseline['decision_indices']        # [B, C]  integer steps
+    decision_times_class = baseline['decision_times']      # [B, C]  seconds
+
+    B, T, C = evidence_traj.shape
+    device = evidence_traj.device
+    dtype = evidence_traj.dtype
+
+    time_axis = torch.arange(T, device=device, dtype=dtype)  # [T]
+
+    # decision_indices: [B, C] → expand to [B, C, T]
+    center = decision_indices.unsqueeze(-1).to(dtype)       # [B, C, 1]
+    # Gaussian soft-index per (batch, class) around its crossing time
+    soft_index = torch.exp(-0.5 * ((time_axis - center) / sigma_steps) ** 2)  # [B, C, T]
+    soft_index = soft_index / soft_index.sum(dim=2, keepdim=True).clamp_min(1e-8)
+
+    # class_evidence[b, c] = Σ_t soft_index[b, c, t] · evidence_traj[b, t, c]
+    class_evidence = (soft_index * evidence_traj.permute(0, 2, 1)).sum(dim=2)  # [B, C]
+
+    choice_probs = torch.softmax(class_evidence / choice_temperature, dim=1)
+    winner_idx = choice_probs.argmax(dim=1)
+
+    # RT: probability-weighted average of per-class decision times
+    pred_rt = (choice_probs * decision_times_class).sum(dim=1)
+
+    return {
+        'pred_rt': pred_rt,
+        'decision_indices': decision_indices,
+        'decision_times': decision_times_class,
+        'winner_idx': winner_idx,
+        'choice_probs': choice_probs,
+        'class_evidence': class_evidence,
+        'soft_index': soft_index,
+    }
+
+
 def compute_rt_readout(
     mode: str,
     evidence_traj: torch.Tensor,
     readout_config: Optional[Dict[str, Any]] = None,
-) -> Dict[str, torch.Tensor]:
+) -> Dict[str, Any]:
     if mode == 'baseline':
-        return compute_baseline_readout(evidence_traj, readout_config=readout_config)
-    if mode == 'soft_hazard':
-        return compute_soft_hazard_readout(evidence_traj, config=readout_config)
-    if mode == 'urgency':
-        return compute_urgency_readout(evidence_traj, config=readout_config)
-    if mode == 'noisy_readout':
+        readout = compute_baseline_readout(evidence_traj, readout_config=readout_config)
+    elif mode == 'soft_hazard':
+        readout = compute_soft_hazard_readout(evidence_traj, config=readout_config)
+    elif mode == 'urgency':
+        readout = compute_urgency_readout(evidence_traj, config=readout_config)
+    elif mode == 'soft_index':
+        readout = compute_soft_index_readout(evidence_traj, config=readout_config)
+    elif mode == 'noisy_readout':
         raise NotImplementedError(f"RT readout mode '{mode}' is reserved for later experiments.")
-    raise ValueError(f"Unknown RT readout mode: {mode}")
+    else:
+        raise ValueError(f"Unknown RT readout mode: {mode}")
+
+    shifted = apply_t0_readout_shift(readout['pred_rt'], readout_config=readout_config)
+    readout = dict(readout)
+    readout['pred_rt'] = shifted['pred_rt']
+    readout['t0_seconds'] = shifted['t0_seconds']
+    readout['t0_mode'] = shifted['t0_mode']
+    return readout
+
+
+def compute_behavioral_losses(
+    *,
+    pred_rt: torch.Tensor,
+    pred_choice: torch.Tensor,
+    choice_probs: torch.Tensor,
+    target_labels: torch.Tensor,
+    response_labels: torch.Tensor,
+    true_rt: torch.Tensor,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, torch.Tensor]:
+    """SPEA-style behavioral loss suite adapted for Wong-Wang training.
+
+    Provides fine-grained behavioral constraints beyond simple RT MSE:
+      - error_rate_loss: squared error between model and human error rates
+      - error_sign_loss:  absolute error between model and human error-correct RT gaps
+      - accuracy_loss:    absolute error between model and human accuracy
+      - response_nll:     NLL on response labels (supervised choice)
+      - rt_mse:           MSE on RT
+
+    Weight keys (via config) with defaults:
+      lambda_error_rate   (0.0)
+      lambda_error_sign   (0.0)
+      lambda_accuracy     (0.0)
+      lambda_response_nll (1.0)
+      lambda_rt_mse       (1.0)
+    """
+    config = config or {}
+    zero = pred_rt.new_zeros(())
+
+    # --- error rate loss ---
+    lambda_error_rate = float(config.get('lambda_error_rate', 0.0))
+    if lambda_error_rate > 0.0:
+        human_accuracy = (response_labels == target_labels).float().mean()
+        model_accuracy = (pred_choice == target_labels).float().mean()
+        error_rate_loss = (1.0 - model_accuracy - (1.0 - human_accuracy)).pow(2)
+    else:
+        error_rate_loss = zero
+
+    # --- error sign loss ---
+    lambda_error_sign = float(config.get('lambda_error_sign', 0.0))
+    if lambda_error_sign > 0.0:
+        pred_correct_mask = pred_choice == target_labels
+        pred_error_mask = ~pred_correct_mask
+        human_correct_mask = response_labels == target_labels
+        human_error_mask = ~human_correct_mask
+
+        if pred_correct_mask.any() and pred_error_mask.any():
+            pred_gap = pred_rt[pred_error_mask].mean() - pred_rt[pred_correct_mask].mean()
+        else:
+            pred_gap = zero
+        if human_correct_mask.any() and human_error_mask.any():
+            human_gap = true_rt[human_error_mask].mean() - true_rt[human_correct_mask].mean()
+        else:
+            human_gap = zero
+        error_sign_loss = (pred_gap - human_gap).abs()
+    else:
+        error_sign_loss = zero
+
+    # --- accuracy loss ---
+    lambda_accuracy = float(config.get('lambda_accuracy', 0.0))
+    if lambda_accuracy > 0.0:
+        human_acc = (response_labels == target_labels).float().mean()
+        model_acc = (pred_choice == target_labels).float().mean()
+        accuracy_loss = (model_acc - human_acc).abs()
+    else:
+        accuracy_loss = zero
+
+    # --- response NLL ---
+    lambda_response_nll = float(config.get('lambda_response_nll', 1.0))
+    if lambda_response_nll > 0.0:
+        response_nll = F.nll_loss(
+            (choice_probs + 1e-8).log(),
+            response_labels.long(),
+        )
+    else:
+        response_nll = zero
+
+    # --- RT MSE ---
+    lambda_rt_mse = float(config.get('lambda_rt_mse', 1.0))
+    if lambda_rt_mse > 0.0:
+        rt_mse = F.mse_loss(pred_rt, true_rt)
+    else:
+        rt_mse = zero
+
+    total = (
+        lambda_error_rate * error_rate_loss
+        + lambda_error_sign * error_sign_loss
+        + lambda_accuracy * accuracy_loss
+        + lambda_response_nll * response_nll
+        + lambda_rt_mse * rt_mse
+    )
+
+    return {
+        'loss': total,
+        'error_rate_loss': error_rate_loss,
+        'error_sign_loss': error_sign_loss,
+        'accuracy_loss': accuracy_loss,
+        'response_nll': response_nll,
+        'rt_mse': rt_mse,
+    }
 
 
 class DiffDecisionMultiClass(Function):
-    """Differentiable decision time computation for multi-class decisions."""
-    
+    """Differentiable decision time computation for multi-class decisions.
+
+    Uses implicit-function-theorem gradient: d(crossing_time)/d(trajectory)
+    = -1 / dsdt at the crossing point.  The forward returns crossing_time * dt
+    so the backward multiplies through by dt for correct chain-rule scaling.
+
+    Batch elements where *no* class crosses the threshold receive zero
+    gradient (the clamped fallback index carries no signal).
+    """
+
     @staticmethod
     def forward(ctx, trajectory, dsdt_trajectory, dt, max_time):
-        mask = trajectory > 0
-        decision_times = mask.float().argmax(dim=1).float()
-        decision_times[mask.sum(dim=1) == 0] = max_time - 1
-        ctx.save_for_backward(dsdt_trajectory, decision_times)
+        mask = trajectory > 0                                 # [B, T, C]
+        decision_times = mask.float().argmax(dim=1).float()   # [B, C]
+        no_cross_any = mask.amax(dim=1).amax(dim=1) == 0      # [B] – no class ever crossed
+        decision_times[no_cross_any] = max_time - 1
+        ctx.save_for_backward(dsdt_trajectory, decision_times, no_cross_any)
+        ctx.dt = float(dt)
         return decision_times * dt
-    
+
     @staticmethod
     def backward(ctx, *grad_outputs):
-        dsdt_trajectory, decision_times = ctx.saved_tensors
+        dsdt_trajectory, decision_times, no_cross_any = ctx.saved_tensors
+        dt = ctx.dt
         grads = torch.zeros_like(dsdt_trajectory)
         grad_output = grad_outputs[0]
-        
+
         decision_indices = decision_times.long()
-        
+
         batch_indices, class_indices = torch.meshgrid(
             torch.arange(decision_times.size(0), device=decision_times.device),
             torch.arange(decision_times.size(1), device=decision_times.device),
-            indexing='ij'
+            indexing='ij',
         )
-        
-        grads[batch_indices, decision_indices[batch_indices, class_indices], class_indices] = \
-            -1.0 / (dsdt_trajectory[batch_indices, decision_indices[batch_indices, class_indices], class_indices] + 1e-6)
-        
-        grads = grads * grad_output.unsqueeze(1).expand_as(grads)
+
+        # dsdt at the detected crossing step for each (batch, class)
+        dsdt_cross = dsdt_trajectory[
+            batch_indices,
+            decision_indices[batch_indices, class_indices],
+            class_indices,
+        ]
+        # clamp near-zero dsdt to avoid extreme / NaN gradients
+        safe_dsdt = dsdt_cross.abs().clamp_min(1e-6)
+
+        grads[batch_indices, decision_indices[batch_indices, class_indices], class_indices] = (
+            -1.0 / safe_dsdt
+        )
+
+        # chain-rule: forward returns decision_times * dt
+        grads = grads * (grad_output.unsqueeze(1).expand_as(grads) * dt)
+
+        # zero gradients for trials where no class ever crossed
+        grads[no_cross_any] = 0.0
+
         return grads, None, None, None
 
 
@@ -533,6 +789,45 @@ class VGGFeatureExtractor(nn.Module):
         logits = self.classifier(x)
         return logits
 
+    def mc_forward(
+        self,
+        x: torch.Tensor,
+        n_samples: int = 30,
+        seed: int = 0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """MC Dropout forward — keeps dropout active at inference time.
+
+        Multiple stochastic forward passes with dropout enabled produce a
+        distribution of logits.  The variance captures epistemic uncertainty
+        (model uncertainty about its own prediction).
+
+        Args:
+            x: Input images [batch, 3, H, W]
+            n_samples: Number of MC samples (default 30)
+            seed: RNG seed for reproducibility
+
+        Returns:
+            mean:   Mean logits across samples    [batch, n_classes]
+            var:    Variance across samples        [batch, n_classes]
+            samples: All raw samples              [n_samples, batch, n_classes]
+        """
+        was_training = self.training
+        self.train()  # keep dropout active
+        with torch.no_grad():
+            g = torch.Generator(device=x.device)
+            if seed >= 0:
+                g.manual_seed(seed)
+            samples = []
+            for _ in range(n_samples):
+                # Re-seed per sample to get independent dropout masks
+                samples.append(self.forward(x))
+            samples = torch.stack(samples, dim=0)  # [S, B, C]
+        if not was_training:
+            self.eval()
+        mean = samples.mean(dim=0)        # [B, C]
+        var = samples.var(dim=0)          # [B, C]
+        return mean, var, samples
+
 
 class WWWrapper(nn.Module):
     """
@@ -547,6 +842,7 @@ class WWWrapper(nn.Module):
         self.ww = WongWangMultiClassDecision(n_classes=n_classes, dt=dt, time_steps=time_steps)
         
         self.register_buffer('scale', torch.tensor(0.25, dtype=torch.float32))
+        self.t0_seconds = nn.Parameter(torch.tensor(0.0, dtype=torch.float32), requires_grad=False)
     
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         """

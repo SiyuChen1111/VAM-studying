@@ -1,5 +1,7 @@
 # RT readout redesign options while preserving accumulation
 
+> **Historical design-note status (2026-05-02):** This file is an earlier option memo, not a current action plan. It remains useful for understanding discarded or deferred readout ideas, but it predates the later bounded successor-screening result and should not be treated as the current repo-wide next-step recommendation.
+
 ## Goal
 
 Preserve the accumulation-style mechanism while improving human-like RT distribution shape.

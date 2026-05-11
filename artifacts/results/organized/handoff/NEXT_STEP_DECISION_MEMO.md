@@ -1,5 +1,7 @@
 # Next-step decision memo
 
+> **Historical status note (2026-05-02):** This memo records an earlier local recommendation from before the bounded successor-screening bundle under `artifacts/results/rt_model_next_step/` was executed. It should not be read as the current repo-wide next-step decision. The current authoritative successor-screening outcome is `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`, which concludes `NO_SUCCESSOR_BRANCH_CLEARED_GATES` and requires a **new planning phase** before any further successor-branch design work.
+
 ## Purpose
 
 This memo summarizes the main experimental lines we tried, what each one taught us, and which line should be kept as the current main path for the next stage.

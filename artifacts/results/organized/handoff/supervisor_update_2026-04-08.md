@@ -1,5 +1,7 @@
 # Supervisor Update — 2026-04-08
 
+> **Historical scope note (2026-05-02):** This supervisor update remains useful as a dated summary of the repository state on 2026-04-08. It predates the later bounded successor-screening bundle under `artifacts/results/rt_model_next_step/`, so its “next move” language should be read as historical context rather than the current final branch verdict. The later authoritative successor-screening outcome is `NO_SUCCESSOR_BRANCH_CLEARED_GATES` in `artifacts/results/rt_model_next_step/06_synthesis/final_successor_branch_memo.md`.
+
 ## Scope
 
 This note gives a concise update on the VGG + Wong-Wang / age-group modeling line after the recent readout, selector, prototype, and error-regime experiments.
